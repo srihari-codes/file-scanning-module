@@ -711,6 +711,46 @@ class YaraScanService:
 		entropy = -sum((count / length) * math.log2(count / length) for count in counts if count)
 		return round(entropy, 2)
 
+	def _calculate_strings_entropy(self, strings: List[MatchString]) -> float:
+		"""Calculate aggregate entropy of matched strings."""
+		if not strings:
+			return 0.0
+		
+		# Combine all matched string values into one buffer
+		combined = "".join(s.value for s in strings).encode("utf-8", errors="ignore")
+		if not combined:
+			return 0.0
+		
+		counts = [0] * 256
+		for byte in combined:
+			counts[byte] += 1
+		
+		length = len(combined)
+		if length == 0:
+			return 0.0
+		
+		import math
+		
+		entropy = -sum((count / length) * math.log2(count / length) for count in counts if count)
+		return round(entropy, 2)
+
+	def _calculate_match_score(self, record: MatchRecord, file_size: int) -> float:
+		"""Calculate a match score based on severity, string count, and position."""
+		# Base score from severity
+		severity_scores = {"critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.3, "unknown": 0.1}
+		base_score = severity_scores.get(record.severity.lower(), 0.1)
+		
+		# Bonus for multiple matched strings (up to +0.15)
+		string_count_bonus = min(len(record.matched_strings) * 0.05, 0.15)
+		
+		# Bonus for family detection (up to +0.05)
+		family_bonus = 0.05 if record.family else 0.0
+		
+		# Calculate final score (capped at 1.0)
+		score = min(base_score + string_count_bonus + family_bonus, 1.0)
+		
+		return round(score, 2)
+
 	def _mime_suggests_packed(self, context: FilePreprocessContext) -> bool:
 		mime = context.mime_result.get("detected_mime", "") or ""
 		if "pe" not in mime.lower():
@@ -786,46 +826,98 @@ class YaraScanService:
 		truncated: bool = False,
 	) -> Dict[str, Any]:
 		total = len(matches)
-		highest = _highest_severity(record.severity for record in matches) if matches else "low"
-		next_step = _suggest_next_step(highest)
-
-		matches_payload = [
-			{
+		file_size = context.file_size
+		
+		# Calculate match density (rules per MB)
+		size_mb = file_size / 1_048_576 + 1e-6
+		match_density_per_mb = round(total / size_mb, 2)
+		
+		# Calculate statistics
+		all_strings = [s for record in matches for s in record.matched_strings]
+		matched_strings_total = len(all_strings)
+		
+		if all_strings:
+			string_lengths = [len(s.value) for s in all_strings]
+			avg_matched_string_length = round(sum(string_lengths) / len(string_lengths), 2)
+			longest_matched_string_length = max(string_lengths)
+			
+			# Calculate entropy of matched strings
+			matched_strings_entropy = self._calculate_strings_entropy(all_strings)
+			has_matched_strings = True
+		else:
+			avg_matched_string_length = 0.0
+			longest_matched_string_length = 0
+			matched_strings_entropy = 0.0  # Normalized fallback instead of null
+			has_matched_strings = False
+		
+		# Count namespaces
+		namespaces = {record.namespace for record in matches}
+		namespaces_count = len(namespaces)
+		
+		# Count distinct families
+		families = {record.family for record in matches if record.family}
+		distinct_families_count = len(families)
+		
+		# Severity counts
+		severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+		for record in matches:
+			severity = record.severity.lower()
+			if severity in severity_counts:
+				severity_counts[severity] += 1
+			else:
+				severity_counts["unknown"] += 1
+		
+		# Top tags
+		tag_counter: Dict[str, int] = {}
+		for record in matches:
+			for tag in record.tags:
+				tag_counter[tag] = tag_counter.get(tag, 0) + 1
+		
+		top_tags = [
+			{"tag": tag, "count": count}
+			for tag, count in sorted(tag_counter.items(), key=lambda x: x[1], reverse=True)[:10]
+		]
+		
+		# Top matches (limit to 3, sorted by match score)
+		scored_matches = []
+		for record in matches:
+			match_score = self._calculate_match_score(record, file_size)
+			first_match_offset_norm = 0.0
+			if record.matched_strings and file_size > 0:
+				first_match_offset_norm = round(record.matched_strings[0].offset / file_size, 4)
+			
+			scored_matches.append({
 				"rule_name": record.rule_name,
 				"namespace": record.namespace,
 				"tags": list(record.tags),
 				"severity": record.severity,
 				"family": record.family,
-				"matched_strings": [
-					{"identifier": string.identifier, "value": string.value, "offset": string.offset}
-					for string in record.matched_strings
-				],
-				"metadata": record.metadata,
-			}
-			for record in matches
-		]
-
+				"matched_strings_count": len(record.matched_strings),
+				"first_match_offset_norm": first_match_offset_norm,
+				"match_score": match_score,
+			})
+		
+		# Sort by match_score descending and take top 3
+		scored_matches.sort(key=lambda x: x["match_score"], reverse=True)
+		top_matches = scored_matches[:3]
+		
 		output = {
-			"yara_scan_success": True,
-			"total_rules_triggered": total,
-			"matches": matches_payload,
-			"inferred_risk": highest,
-			"suggested_next_step": next_step,
-			"timestamp": datetime.now(timezone.utc).isoformat(),
-			"file": {
-				"filename": context.filename,
-				"sha256": context.sha256,
-				"size": context.file_size,
-				"mime": context.mime_result.get("detected_mime"),
-			},
-			"mode": mode,
-			"categories_requested": list(categories or []),
-			"provenance": {
-				"rule_corpus_last_loaded": self._last_loaded_at.isoformat() if self._last_loaded_at else None,
-				"rule_sources": [str(source.path) for source in self._rule_sources],
+			"yara": {
+				"scan_success": True,
+				"total_rules_triggered": total,
+				"match_density_per_mb": match_density_per_mb,
+				"matched_strings_total": matched_strings_total,
+				"matched_strings_entropy": matched_strings_entropy,
+				"has_matched_strings": has_matched_strings,
+				"avg_matched_string_length": avg_matched_string_length,
+				"longest_matched_string_length": longest_matched_string_length,
+				"namespaces_count": namespaces_count,
+				"distinct_families_count": distinct_families_count,
 				"match_cap_hit": truncated,
-				"match_cap": self.max_match_records,
-			},
+				"severity_counts": severity_counts,
+				"top_tags": top_tags,
+				"top_matches": top_matches,
+			}
 		}
 
 		logger.info("This is the holy drop – YARA output handed over to ML engine")
