@@ -591,9 +591,9 @@ class YaraScanService:
 		if compiled is None:
 			raise YaraExecutionError("YARA ruleset is not compiled", code="YARA_RULESET_NOT_READY")
 
-		timeout_seconds: Optional[float] = None
+		timeout_seconds: Optional[int] = None
 		if self.match_timeout_ms is not None:
-			timeout_seconds = max(self.match_timeout_ms, 0) / 1000
+			timeout_seconds = int(max(self.match_timeout_ms, 0) / 1000)
 		requested_categories = set(_select_categories(categories) or [])
 		logger.info("Running %s YARA scan with granular control", mode)
 
