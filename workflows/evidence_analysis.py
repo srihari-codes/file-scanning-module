@@ -6,10 +6,10 @@ from services.file_data import FileDataService
 from services.file_hashing import FileHashingService
 from services.hash_lookup import HashLookupService
 from services.mime_sniffing import MimeSniffingService
+from services.file_entropy import FileEntropyService
 from services.clam_av import ClamAVService
 from services.yara_scan import YaraScanService
 from services.report_generator import ReportGeneratorService
-from services.file_entropy import FileEntropyService
 from utils.logger import get_logger
 from processors.image_processor import ImageProcessor
 from processors.video_processor import VideoProcessor
