@@ -324,7 +324,9 @@ class ImageProcessor:
     def _objects_and_scene(img: Image.Image) -> Dict[str, Any]:
         res = {"object_count": None, "detected_objects": [], "scene_tags": []}
         try:
-            model = YOLO("yolov8n.pt")
+            model_path = os.path.join(os.path.dirname(__file__), "..", "helpers", "yolov8n.pt")
+            model_path = os.path.abspath(model_path)
+            model = YOLO(model_path)
             results = model(img)
             objs = []
             for r in results:
@@ -356,10 +358,9 @@ class ImageProcessor:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 img.save(tmp.name)
                 tmp_path = tmp.name
-            
+
             try:
                 detector = NudeDetector()
-                # detect returns list of detections with labels and scores
                 results = detector.detect(tmp_path)
                 
                 # Calculate overall NSFW score based on detected parts
