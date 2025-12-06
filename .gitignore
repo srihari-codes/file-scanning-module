@@ -142,29 +142,5 @@ credentials/
 .dockerignore
 docker-compose.override.yml
 
-# Documentation builds
-docs/_build/
-site/
 
-# Package manager
-package-lock.json
-yarn.lock
 
-# Redis dump
-dump.rdb
-
-# Celery
-celerybeat-schedule
-celerybeat.pid
-
-# MongoDB data (if running locally)
-mongodb_data/
-data/db/
-
-# MinIO data (if running locally)
-minio_data/
-
-# Reports and analysis results
-reports/
-analysis_output/
-scan_results/

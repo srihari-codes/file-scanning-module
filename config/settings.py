@@ -9,13 +9,6 @@ class Settings(BaseSettings):
     MONGODB_READ_COLLECTION: str
     MONGODB_WRITE_COLLECTION: str
     
-    # MinIO Configuration
-    MINIO_ENDPOINT: str
-    MINIO_ACCESS_KEY: str
-    MINIO_SECRET_KEY: str
-    MINIO_BUCKET: str
-    MINIO_USE_HTTPS: bool 
-    
     # Supabase Configuration
     SUPABASE_URL: str
     SUPABASE_KEY: str
