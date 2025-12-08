@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Dict, Any
+import aiohttp
 from services.file_data import FileDataService
 from services.file_hashing import FileHashingService
 from services.hash_lookup import HashLookupService
@@ -16,10 +17,7 @@ from processors.video_processor import VideoProcessor
 from processors.audio_processor import AudioProcessor
 from processors.document_processor import DocumentProcessor
 from processors.spreadsheet_processor import SpreadsheetProcessor
-from processors.email_processor import EmailProcessor
 from processors.archive_processor import ArchiveProcessor
-from processors.webpage_processor import WebpageProcessor
-from processors.log_processor import LogProcessor
 from processors.executable_processor import ExecutableProcessor
 from processors.apk_processor import ApkProcessor
 from database.db_manager import DatabaseManager
@@ -67,24 +65,58 @@ class EvidenceAnalysisWorkflow:
         }
 
         try:
-            evidence_ids = await self.db_manager.get_evidence_ids(complaint_id)
+            evidence_entries = await self.db_manager.get_evidence_ids(complaint_id)
 
-            if not evidence_ids:
+            if not evidence_entries:
                 return {
                     "complaint_id": complaint_id,
                     "overall_status": "no_evidences",
                     "message": "No evidence files found for this complaint_id"
                 }
 
-            logger.info(f"Processing {len(evidence_ids)} evidence file(s) for complaint_id: {complaint_id}")
+            logger.info(f"Processing {len(evidence_entries)} evidence file(s) for complaint_id: {complaint_id}")
 
-            for evidence_id in evidence_ids:
+            for entry in evidence_entries:
+                # Support both old structure (dict/ID) and new structure (URL string)
+                if isinstance(entry, str):
+                    # New DB format: entry is a URL pointing to the evidence
+                    evidence_id = entry  # use the URL as identifier for storage/lookup
+                    evidence_url = entry
+                elif isinstance(entry, dict):
+                    # Old format for backward compatibility
+                    evidence_id = entry.get("evidence_id")
+                    evidence_url = None
+                else:
+                    evidence_id = str(entry)
+                    evidence_url = None
+
                 evidence_result: Dict[str, Any] = {
                     "complaint_id": complaint_id,
                     "evidence_id": evidence_id,
                 }
                 try:
-                    file_name, file_data = await self.file_data_service.fetch_file_data(complaint_id, evidence_id)
+                    # Fetch file_name and file_data either from URL or via FileDataService
+                    if evidence_url and evidence_url.lower().startswith(("http://", "https://")):
+                        file_name = Path(evidence_url).name
+                        async with aiohttp.ClientSession(timeout=self.file_data_service._timeout) as session:
+                            async with session.get(evidence_url, headers=self.file_data_service._headers) as resp:
+                                if resp.status == 404:
+                                    logger.warning("Evidence file missing during download | url=%s", evidence_url)
+                                    raise FileNotFoundError("Evidence file not found at provided URL")
+                                if resp.status != 200:
+                                    body = await resp.text()
+                                    logger.error(
+                                        "Evidence URL download failed | status=%s | url=%s | body=%s",
+                                        resp.status,
+                                        evidence_url,
+                                        body,
+                                    )
+                                    raise RuntimeError("Failed to download evidence file from provided URL")
+                                file_data = await resp.read()
+                    else:
+                        # Fallback to previous behavior (complaint_id + evidence_id)
+                        file_name, file_data = await self.file_data_service.fetch_file_data(complaint_id, evidence_id)
+
                     evidence_result["file_name"] = file_name
                     file_name_extension = (
                         Path(file_name).suffix.lstrip(".").lower() if file_name else None
@@ -135,7 +167,10 @@ class EvidenceAnalysisWorkflow:
                     file_category = mime_result.get("category")
 
                     if file_category in self.processors:
-                        processor_result = await self.processors[file_category].process(file_data, file_extension)
+                        processor = self.processors[file_category]
+                        processor_result = processor.process(file_data, file_extension)
+                        if asyncio.iscoroutine(processor_result):
+                            processor_result = await processor_result
                         evidence_result["file_type_analysis"] = processor_result
 
                     final_report = await self.report_generator_service.generate_report(evidence_result)
