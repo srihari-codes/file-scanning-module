@@ -1,5 +1,9 @@
-from typing import Dict
+from typing import Dict, Optional
+
 from database.db_manager import DatabaseManager
+from database.filescanner_microservice_table.repository import (
+    FilescannerMicroserviceTableRepository,
+)
 from config.settings import settings
 from utils.logger import get_logger
 import aiohttp
@@ -9,9 +13,31 @@ logger = get_logger(__name__)
 
 
 class HashLookupService:
-    def __init__(self):
-        self.db_manager = DatabaseManager()
-        self.filescanner_repo = self.db_manager.filescanner
+    def __init__(
+        self,
+        *,
+        db_manager: Optional[DatabaseManager] = None,
+        filescanner_repo: Optional[FilescannerMicroserviceTableRepository] = None,
+    ) -> None:
+        """Create a hash lookup helper.
+
+        Args:
+            db_manager: Optional shared DatabaseManager to avoid opening a new
+                Motor client. If provided, ``filescanner_repo`` is derived from it
+                unless explicitly supplied.
+            filescanner_repo: Direct repository handle; allows callers that
+                already resolved the collection to inject it directly.
+        """
+
+        if filescanner_repo is not None:
+            self.filescanner_repo = filescanner_repo
+            self.db_manager = db_manager
+        elif db_manager is not None:
+            self.db_manager = db_manager
+            self.filescanner_repo = db_manager.filescanner
+        else:
+            self.db_manager = DatabaseManager()
+            self.filescanner_repo = self.db_manager.filescanner
 
     async def lookup_hash(
         self,

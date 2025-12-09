@@ -32,7 +32,10 @@ class EvidenceAnalysisWorkflow:
         self.filescanner_repo = self.db_manager.filescanner
         self.file_data_service = FileDataService()
         self.file_hashing_service = FileHashingService()
-        self.hash_lookup_service = HashLookupService()
+        self.hash_lookup_service = HashLookupService(
+            filescanner_repo=self.filescanner_repo,
+            db_manager=self.db_manager,
+        )
         self.mime_sniffing_service = MimeSniffingService()
         self.clam_av_service = ClamAVService()
         self.yara_scan_service = YaraScanService()
