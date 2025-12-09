@@ -46,10 +46,7 @@ class EvidenceAnalysisWorkflow:
             "audio": AudioProcessor(),
             "document": DocumentProcessor(),
             "spreadsheet": SpreadsheetProcessor(),
-            "email": EmailProcessor(),
             "archive": ArchiveProcessor(),
-            "webpage": WebpageProcessor(),
-            "log": LogProcessor(),
             "executable": ExecutableProcessor(),
             "apk": ApkProcessor()
         }
