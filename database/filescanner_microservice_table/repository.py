@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from motor.motor_asyncio import AsyncIOMotorCollection
 from pymongo.errors import PyMongoError
@@ -246,4 +246,73 @@ class FilescannerMicroserviceTableRepository:
 
         except PyMongoError as exc:
             logger.error("Error updating evidence report: %s", exc)
+            raise
+
+    async def store_compiled_report(
+        self,
+        complaint_id: str,
+        evidences: List[Dict[str, Any]],
+    ) -> bool:
+        """Upsert a simplified report payload for the entire complaint."""
+        try:
+            if not evidences:
+                logger.warning(
+                    "No evidence entries provided for complaint_id: %s while storing compiled report",
+                    complaint_id,
+                )
+                return False
+
+            sanitized: List[Dict[str, Any]] = []
+            for entry in evidences:
+                if not isinstance(entry, dict):
+                    continue
+                evidence_id = entry.get("evidence_id")
+                if not evidence_id:
+                    continue
+                sanitized.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "file_hash": entry.get("file_hash"),
+                        "report": entry.get("report"),
+                    }
+                )
+
+            if not sanitized:
+                logger.warning(
+                    "No valid evidence rows to persist for complaint_id: %s",
+                    complaint_id,
+                )
+                return False
+
+            update_doc = {
+                "complaint_id": complaint_id,
+                "evidences": sanitized,
+                "updated_at": datetime.utcnow(),
+            }
+
+            result = await self.collection.update_one(
+                {"complaint_id": complaint_id},
+                {
+                    "$set": update_doc,
+                    "$setOnInsert": {"created_at": datetime.utcnow()},
+                },
+                upsert=True,
+            )
+
+            if result.matched_count or result.upserted_id is not None:
+                logger.info(
+                    "Stored compiled report for complaint_id: %s with %d evidence(s)",
+                    complaint_id,
+                    len(sanitized),
+                )
+                return True
+
+            logger.warning(
+                "Failed to upsert compiled report for complaint_id: %s",
+                complaint_id,
+            )
+            return False
+
+        except PyMongoError as exc:
+            logger.error("Error storing compiled report: %s", exc)
             raise

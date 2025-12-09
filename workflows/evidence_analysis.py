@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 import aiohttp
 from services.file_data import FileDataService
 from services.file_hashing import FileHashingService
@@ -63,6 +63,7 @@ class EvidenceAnalysisWorkflow:
             "evidences_failed": 0,
             "evidence_results": []
         }
+        compiled_evidences: List[Dict[str, Any]] = []
 
         try:
             evidence_entries = await self.db_manager.get_evidence_ids(complaint_id)
@@ -114,8 +115,20 @@ class EvidenceAnalysisWorkflow:
                                     raise RuntimeError("Failed to download evidence file from provided URL")
                                 file_data = await resp.read()
                     else:
-                        # Fallback to previous behavior (complaint_id + evidence_id)
-                        file_name, file_data = await self.file_data_service.fetch_file_data(complaint_id, evidence_id)
+                        # Supabase path can contain multiple files; pick first for backward compatibility
+                        files = await self.file_data_service.fetch_file_data(complaint_id, evidence_id)
+                        if not files:
+                            raise RuntimeError(
+                                f"No evidence files returned for complaint_id={complaint_id}, evidence_id={evidence_id}"
+                            )
+                        if len(files) > 1:
+                            logger.warning(
+                                "Multiple files (%s) found for complaint_id=%s evidence_id=%s; processing first entry",
+                                len(files),
+                                complaint_id,
+                                evidence_id,
+                            )
+                        file_name, file_data = files[0]
 
                     evidence_result["file_name"] = file_name
                     file_name_extension = (
@@ -141,41 +154,40 @@ class EvidenceAnalysisWorkflow:
                     lookup_result = await self.hash_lookup_service.lookup_hash(hash_result, complaint_id, evidence_id)
                     evidence_result["hash_lookup"] = json.dumps(lookup_result)
 
-                    if lookup_result.get("local_lookup") or lookup_result.get("online_lookup"):
+                    hash_hit = lookup_result.get("local_lookup") or lookup_result.get("online_lookup")
+                    if hash_hit:
                         evidence_result["status"] = "already_processed"
                         source = "local database" if lookup_result.get("local_lookup") else "VirusTotal"
                         evidence_result["message"] = f"File hash found in {source}. Analysis copied/populated."
+                        evidence_result["report"] = evidence_result.get("message")
                         logger.info(f"Hash found in {source}. Skipping further processing.")
-                        await self.filescanner_repo.store_analysis_results(complaint_id, evidence_id, evidence_result)
-                        overall_results["evidences_processed"] += 1
-                        overall_results["evidence_results"].append(evidence_result)
-                        continue
+                    else:
+                        mime_result, entropy_result, clam_av_result, yara_result = await asyncio.gather(
+                            self.mime_sniffing_service.sniff_mime(file_data, filename=file_name, claimed_mime=file_name_extension),
+                            self.file_entropy_service.calculate_entropy(file_data),
+                            self.clam_av_service.scan(file_data),
+                            self.yara_scan_service.scan_full(file_data)
+                        )
 
-                    mime_result, entropy_result, clam_av_result, yara_result = await asyncio.gather(
-                        self.mime_sniffing_service.sniff_mime(file_data, filename=file_name, claimed_mime=file_name_extension),
-                        self.file_entropy_service.calculate_entropy(file_data),
-                        self.clam_av_service.scan(file_data),
-                        self.yara_scan_service.scan_full(file_data)
-                    )
+                        evidence_result["mime_type"] = mime_result
+                        evidence_result["entropy"] = entropy_result
+                        evidence_result["clam_av"] = clam_av_result
+                        evidence_result["yara_scan"] = yara_result
 
-                    evidence_result["mime_type"] = mime_result
-                    evidence_result["entropy"] = entropy_result
-                    evidence_result["clam_av"] = clam_av_result
-                    evidence_result["yara_scan"] = yara_result
+                        file_extension = mime_result.get("extension")
+                        file_category = mime_result.get("category")
 
-                    file_extension = mime_result.get("extension")
-                    file_category = mime_result.get("category")
+                        if file_category in self.processors:
+                            processor = self.processors[file_category]
+                            processor_result = processor.process(file_data, file_extension)
+                            if asyncio.iscoroutine(processor_result):
+                                processor_result = await processor_result
+                            evidence_result["file_type_analysis"] = processor_result
 
-                    if file_category in self.processors:
-                        processor = self.processors[file_category]
-                        processor_result = processor.process(file_data, file_extension)
-                        if asyncio.iscoroutine(processor_result):
-                            processor_result = await processor_result
-                        evidence_result["file_type_analysis"] = processor_result
-
-                    final_report = await self.report_generator_service.generate_report(evidence_result)
-                    evidence_result["final_report"] = final_report
-                    evidence_result["status"] = "completed"
+                        final_report = await self.report_generator_service.generate_report(evidence_result)
+                        evidence_result["final_report"] = final_report
+                        evidence_result["report"] = final_report
+                        evidence_result["status"] = "completed"
 
                     await self.filescanner_repo.store_analysis_results(complaint_id, evidence_id, evidence_result)
                     overall_results["evidences_processed"] += 1
@@ -183,6 +195,7 @@ class EvidenceAnalysisWorkflow:
                 except Exception as evidence_error:
                     evidence_result["status"] = "failed"
                     evidence_result["error"] = str(evidence_error)
+                    evidence_result["report"] = evidence_result.get("error")
                     overall_results["evidences_failed"] += 1
                     try:
                         await self.filescanner_repo.store_analysis_results(complaint_id, evidence_id, evidence_result)
@@ -190,6 +203,9 @@ class EvidenceAnalysisWorkflow:
                         logger.error(f"Failed to store error results: {store_error}")
 
                 overall_results["evidence_results"].append(evidence_result)
+                summary_entry = self._build_compiled_entry(evidence_result)
+                if summary_entry:
+                    compiled_evidences.append(summary_entry)
 
             if overall_results["evidences_failed"] == 0:
                 overall_results["overall_status"] = "completed"
@@ -197,6 +213,14 @@ class EvidenceAnalysisWorkflow:
                 overall_results["overall_status"] = "partially_completed"
             else:
                 overall_results["overall_status"] = "failed"
+
+            if compiled_evidences:
+                try:
+                    await self.db_manager.store_compiled_report(complaint_id, compiled_evidences)
+                except Exception as compiled_error:
+                    logger.error(
+                        f"Failed to store compiled report for complaint_id {complaint_id}: {compiled_error}"
+                    )
 
             logger.info(
                 f"Completed processing for complaint_id: {complaint_id}. "
@@ -211,3 +235,22 @@ class EvidenceAnalysisWorkflow:
             overall_results["overall_status"] = "failed"
             overall_results["error"] = str(workflow_error)
             return overall_results
+
+    def _build_compiled_entry(self, evidence_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        evidence_id = evidence_result.get("evidence_id")
+        if not evidence_id:
+            return None
+
+        file_hash = evidence_result.get("hash") or evidence_result.get("file_hash")
+        report_value = (
+            evidence_result.get("report")
+            or evidence_result.get("final_report")
+            or evidence_result.get("message")
+            or evidence_result.get("error")
+        )
+
+        return {
+            "evidence_id": evidence_id,
+            "file_hash": file_hash,
+            "report": report_value,
+        }

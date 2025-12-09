@@ -59,6 +59,11 @@ class DatabaseManager:
     ) -> bool:
         return await self.filescanner.add_file_hash(complaint_id, evidence_id, hash_value)
 
+    async def store_compiled_report(
+        self, complaint_id: str, evidences: List[Dict[str, Any]]
+    ) -> bool:
+        return await self.filescanner.store_compiled_report(complaint_id, evidences)
+
     async def close(self) -> None:
         if self.client:
             self.client.close()
